@@ -52,8 +52,6 @@ def calculate_profit(df):
                     raise Exception(f"Trying to sell more shares of {id} than was bought.")
                 except KeyError:
                     raise Exception(f"Trying to sell shares of {id} which were not bought.")
-                except Exception as e:
-                    raise e
                 
                 # If the number of shares of the buy action is less than or equal to the number of shares to sell
                 if buy_no_of_shares <= no_of_shares:
@@ -77,10 +75,12 @@ def calculate_profit(df):
             total_profit += profit
 
         elif action == 'Split':
+            # Multiply the number of shares and divide the price by ratio
             for i in range(len(stocks[id])):
                 stocks[id][i] = (stocks[id][i][0] * no_of_shares, stocks[id][i][1] / no_of_shares, stocks[id][i][2])
 
         elif action == 'Merge':
+            # Divide the number of shares and multiply the price by ratio
             for i in range(len(stocks[id])):
                 stocks[id][i] = (stocks[id][i][0] / no_of_shares, stocks[id][i][1] * no_of_shares, stocks[id][i][2])
 
