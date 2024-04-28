@@ -2,14 +2,23 @@ import argparse
 import pandas as pd
 from collections import deque
 from datetime import timedelta
+import requests
 
-def get_eur_pln_rate(date):
-    # This function should return the EUR-PLN rate for the given date
-    return 1.0
+def get_eur_pln_rate(date) -> float:
+    date_str = date.strftime('%Y-%m-%d')
+    url = f"http://api.nbp.pl/api/exchangerates/rates/a/eur/{date_str}/?format=json"
+    response = requests.get(url)
+
+    if response.status_code == 200:
+        data = response.json()
+        price = data['rates'][0]['mid']
+        return price
+    else:
+        raise Exception(f"Failed to fetch data from NBP API. Status code: {response.status_code}")
 
 def calculate_profit(df):
     # Convert the 'Time' column to datetime format
-    df['Time'] = pd.to_datetime(df['Time'], format='%d/%m/%y')
+    df['Time'] = pd.to_datetime(df['Time'])
     
     # Convert the 'No. of shares' and 'Price / share' columns to float
     df['No. of shares'] = df['No. of shares'].astype(float)
@@ -91,6 +100,6 @@ if __name__ == '__main__':
     profit = calculate_profit(df)
 
     # Calculate the tax
-    tax = profit * 0.19
+    tax = max(0, profit * 0.19)
 
-    print(f'Tax to be paid: {tax:.2f} PLN')
+    print(f'Profit: {profit:.6f} PLN.\nTax to be paid: {tax:.6f} PLN.')
