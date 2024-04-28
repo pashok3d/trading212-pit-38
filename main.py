@@ -17,16 +17,6 @@ def get_eur_pln_rate(date) -> float:
         raise Exception(f"Failed to fetch data from NBP API. Status code: {response.status_code}")
 
 def calculate_profit(df):
-    # Convert the 'Time' column to datetime format
-    df['Time'] = pd.to_datetime(df['Time'])
-    
-    # Convert the 'No. of shares' and 'Price / share' columns to float
-    df['No. of shares'] = df['No. of shares'].astype(float)
-    df['Price / share'] = df['Price / share'].astype(float)
-
-    # Keep only those columns that are needed
-    df = df[['Action', 'Time', 'ISIN', 'No. of shares', 'Price / share']]
-
     # Initialize an empty dictionary to store the stocks
     stocks = {}
     
@@ -55,8 +45,15 @@ def calculate_profit(df):
 
             # While there are shares to sell
             while no_of_shares > 0:
-                # Get the number of shares, price per share, and time of the first buy action of the stock
-                buy_no_of_shares, buy_price_per_share, buy_time = stocks[id][0]
+                try:
+                    # Get the leftmost buy operation from the deque
+                    buy_no_of_shares, buy_price_per_share, buy_time = stocks[id][0]
+                except IndexError:
+                    raise Exception(f"Trying to sell more shares of {id} than was bought.")
+                except KeyError:
+                    raise Exception(f"Trying to sell shares of {id} which were not bought.")
+                except Exception as e:
+                    raise e
                 
                 # If the number of shares of the buy action is less than or equal to the number of shares to sell
                 if buy_no_of_shares <= no_of_shares:
@@ -64,7 +61,7 @@ def calculate_profit(df):
                     cost_value_pln += buy_no_of_shares * buy_price_per_share * get_eur_pln_rate(buy_time - timedelta(days=1))
                     # Subtract the number of shares of the buy action from the number of shares to sell
                     no_of_shares -= buy_no_of_shares
-                    # Remove the buy action from the deque of the stock
+                    # Remove the buy action from the deque
                     stocks[id].popleft()
                 else:
                     # Add the cost value in PLN of the number of shares to sell to the cost value in PLN
@@ -79,12 +76,22 @@ def calculate_profit(df):
             # Add the profit to the total profit
             total_profit += profit
 
+        elif action == 'Split':
+            for i in range(len(stocks[id])):
+                stocks[id][i] = (stocks[id][i][0] * no_of_shares, stocks[id][i][1] / no_of_shares, stocks[id][i][2])
+
+        elif action == 'Merge':
+            for i in range(len(stocks[id])):
+                stocks[id][i] = (stocks[id][i][0] / no_of_shares, stocks[id][i][1] * no_of_shares, stocks[id][i][2])
+
+
     return total_profit
 
 if __name__ == '__main__':
     # Parse the arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data', type=str, help='Path to the data file exported from trading212')
+    parser.add_argument('--data', type=str, required=True, help='Path to the data file exported from trading212 in csv format')
+    parser.add_argument('--merge_split_events', type=str, help='Path to the merge/split events of the stocks in json format')
     args = parser.parse_args()
 
     # Load the data
@@ -95,6 +102,31 @@ if __name__ == '__main__':
 
     # Keep only those actions where ISIN participated in Market sell
     df = df[df['ISIN'].isin(df[df['Action'] == 'Market sell']['ISIN'])]
+
+    # Convert the 'Time' column to datetime format
+    df['Time'] = pd.to_datetime(df['Time'])
+    
+    # Convert the 'No. of shares' and 'Price / share' columns to float
+    df['No. of shares'] = df['No. of shares'].astype(float)
+    df['Price / share'] = df['Price / share'].astype(float)
+
+    # Keep only those columns that are needed
+    df = df[['Action', 'Time', 'ISIN', 'No. of shares', 'Price / share']]
+
+    # Load the merge/split events
+    if args.merge_split_events:
+        merge_split_events = pd.read_json(args.merge_split_events, lines=True)
+        merge_split_events['Time'] = pd.to_datetime(merge_split_events['Time'])
+
+        # Rename columns to match the main DataFrame
+        merge_split_events.rename(columns={'Ratio': 'No. of shares'}, inplace=True)
+        merge_split_events['Price / share'] = None  # Add a dummy column for price per share
+
+        # Append merge and split events to the main DataFrame
+        df = pd.concat([df, merge_split_events], ignore_index=True)
+
+    # Sort by 'Time'
+    df = df.sort_values(by='Time')
 
     # Calculate the tax
     profit = calculate_profit(df)
