@@ -1,12 +1,2 @@
-{
-    "Action": "Merge",
-    "Time": "2019-01-01T00:00:00Z",
-    "ISIN": "US0378331005",
-    "Ratio": 2
-}
-{
-    "Action": "Split",
-    "Time": "2020-01-01T00:00:00Z",
-    "ISIN": "US0378331005",
-    "Ratio": 0.5
-}
+{"Action": "Split", "Time": "2022-08-25", "Ticker": "TSLA", "Ratio": 0.3333333333333333}
+{"Action": "Split", "Time": "2022-08-25", "Ticker": "TL0","Ratio": 0.3333333333333333}
