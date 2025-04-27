@@ -1,34 +1,50 @@
-import argparse
 import pandas as pd
-from collections import deque
-from datetime import timedelta
-import requests
 import arrow
+import requests
+from collections import defaultdict, deque
+import argparse
 import sys
+from loguru import logger
+from typing import Literal
 
+# Tax rate in Poland
 TAX_RATE = 0.19
 
+# Known non-working days in Poland (holidays) for 2024
+# This should be expanded with a complete list of holidays for relevant years
 NON_WORKING_DAYS = [
-    "2023-06-08",
-    "2023-08-15",
-    "2023-11-01",
-    "2023-12-23",
-    "2023-12-24",
-    "2023-12-25",
-    "2023-12-26",
-    "2023-12-30",
-    "2023-12-31",
-    "2024-01-01",
+    "2024-01-01",  # New Year's Day
+    "2024-01-06",  # Epiphany
+    "2024-03-31",  # Easter
+    "2024-04-01",  # Easter Monday
+    "2024-05-01",  # Labor Day
+    "2024-05-03",  # Constitution Day
+    "2024-05-19",  # Pentecost
+    "2024-05-30",  # Corpus Christi
+    "2024-08-15",  # Assumption Day
+    "2024-11-01",  # All Saints' Day
+    "2024-11-11",  # Independence Day
+    "2024-12-25",  # Christmas Day
+    "2024-12-26",  # Second Day of Christmas
 ]
 
+# Cache for exchange rates to avoid duplicate API calls
+exchange_rate_cache = {}
 
-def get_eur_pln_rate(time: pd.Timestamp) -> float:
+
+def get_exchange_rate(
+    currency: Literal["PLN", "EUR", "GBP"], time: pd.Timestamp
+) -> float:
     """
-    Get the exchange rate of EUR to PLN from NBP API for a given date
+    Get the exchange rate for a given currency to PLN on the day before the transaction
+    Uses a cache to avoid duplicate API calls
 
     Raises:
         Exception: If the API request fails
     """
+    if currency == "PLN":
+        return 1.0
+
     day_before = arrow.get(time).shift(days=-1)
 
     while day_before.strftime("%Y-%m-%d") in NON_WORKING_DAYS:
@@ -50,151 +66,434 @@ def get_eur_pln_rate(time: pd.Timestamp) -> float:
         return price
     else:
         raise Exception(
-            f"Failed to fetch EUR-PLN exchange rate from NBP API. Status code: {response.status_code}"
+            f"Failed to fetch {currency}-PLN exchange rate from NBP API. Status code: {response.status_code}"
         )
 
 
-def calculate_profit(df):
-    stocks = {}
+def calculate_tax(csv_file, year=None, merge_split_file=None):
+    """
+    Calculate tax based on the trading activity in the CSV file
+    using FIFO method as required by Polish tax law
+    """
+    # Read the CSV file
+    logger.info(f"Reading transactions from {csv_file}...")
+    df = pd.read_csv(csv_file)
+
+    # Convert the time column to datetime
+    df["Time"] = pd.to_datetime(df["Time"])
+
+    # Filter transactions for the specified year if provided
+    if year:
+        df = df[df["Time"].dt.year == year]
+        logger.info(f"Found {len(df)} transactions for {year}")
+
+    # Remove duplicates if they exist
+    df.drop_duplicates(subset=["ID"], inplace=True)
+
+    # Load merge/split events if provided
+    if merge_split_file:
+        try:
+            merge_split_events = pd.read_json(merge_split_file, lines=True)
+            # Rename columns to match the main data
+            merge_split_events.rename(columns={"Ratio": "No. of shares"}, inplace=True)
+            # Add dummy fields to match the main data schema
+            merge_split_events["Price / share"] = None
+
+            # Combine with main data
+            df = pd.concat([df, merge_split_events], ignore_index=True)
+            logger.info(f"Added merge/split events from {merge_split_file}")
+        except Exception as e:
+            raise Exception(f"Failed to read merge/split events: {e}") from e
+
+    # Sort by time for chronological processing
+    df.sort_values("Time", inplace=True)
+
+    # Dictionary to store buy transactions using deque for FIFO
+    buy_queues = defaultdict(deque)
+
+    # List to store processed sell transactions with calculated profit
+    sell_transactions = []
+
+    # Dictionary to track profit by ticker
+    profit_by_ticker = defaultdict(float)
+
+    # Track totals
     total_profit = 0
     total_dividend = 0
     total_interest = 0
 
+    # Process transactions in chronological order
     for _, row in df.iterrows():
-        operation = row.to_dict()
-        action, time, id, no_of_shares, price_per_share, total = (
-            operation["Action"],
-            operation["Time"],
-            operation["Ticker"],
-            operation["No. of shares"],
-            operation["Price / share"],
-            operation["Total"],
+        action = row["Action"]
+        ticker = row["Ticker"]
+        name = row.get("Name", ticker)  # Use ticker as fallback if name not present
+        transaction_time = row["Time"]
+
+        try:
+            shares = float(row["No. of shares"])
+            price_per_share = (
+                float(row["Price / share"]) if pd.notna(row["Price / share"]) else 0
+            )
+            currency = row["Currency (Price / share)"]
+            total_amount = float(row["Total"]) if pd.notna(row["Total"]) else 0
+
+            # Skip if necessary fields are missing
+            if pd.isna(currency) and action in ["Market buy", "Market sell"]:
+                raise ValueError("Missing currency")
+
+            # Get exchange rate for the transaction date for relevant currencies
+            exchange_rate_to_pln = get_exchange_rate(currency, transaction_time)
+
+            # Handle different types of actions
+            if action == "Market buy":
+                # Add buy transaction to the queue
+                buy_queues[ticker].append(
+                    {
+                        "time": transaction_time,
+                        "shares": shares,
+                        "price_per_share": price_per_share,
+                        "price_pln": price_per_share * exchange_rate_to_pln,
+                        "currency": currency,
+                        "exchange_rate": exchange_rate_to_pln,
+                    }
+                )
+
+            elif action == "Market sell":
+                remaining_shares = shares
+                total_cost_pln = 0
+                matching_buys = []
+
+                # Calculate sell price in PLN
+                sell_price_pln = price_per_share * exchange_rate_to_pln
+                total_sell_pln = shares * sell_price_pln
+
+                # Follow FIFO principle to match buy transactions
+                while (
+                    remaining_shares > sys.float_info.epsilon
+                ):  # Use epsilon to handle floating point precision
+                    try:
+                        # Get the leftmost buy operation from the queue
+                        oldest_buy = buy_queues[ticker][0]
+                    except IndexError as e:
+                        raise Exception(
+                            f"Not enough shares to sell. Attempting to sell {remaining_shares} more shares than available. "
+                            "Make sure all prior buy transactions are included in the data."
+                        ) from e
+
+                    used_shares = min(remaining_shares, oldest_buy["shares"])
+
+                    matching_buys.append(
+                        {
+                            "buy_time": oldest_buy["time"],
+                            "shares": used_shares,
+                            "buy_price": oldest_buy["price_per_share"],
+                            "buy_price_pln": oldest_buy["price_pln"],
+                            "currency": oldest_buy["currency"],
+                            "exchange_rate": oldest_buy["exchange_rate"],
+                        }
+                    )
+
+                    # Calculate cost in PLN for the portion being sold
+                    portion_cost_pln = used_shares * oldest_buy["price_pln"]
+                    total_cost_pln += portion_cost_pln
+
+                    remaining_shares -= used_shares
+
+                    if abs(used_shares - oldest_buy["shares"]) < sys.float_info.epsilon:
+                        # If we used all shares from this buy order, remove it
+                        buy_queues[ticker].popleft()
+                    else:
+                        # Otherwise, update the shares count in the buy order
+                        buy_queues[ticker][0]["shares"] -= used_shares
+
+                # Calculate profit in PLN
+                profit_pln = total_sell_pln - total_cost_pln
+                total_profit += profit_pln
+                profit_by_ticker[ticker] += profit_pln
+
+                # Record the sell transaction with profit information
+                sell_transactions.append(
+                    {
+                        "ticker": ticker,
+                        "name": name,
+                        "sell_time": transaction_time,
+                        "shares": shares,
+                        "sell_price": price_per_share,
+                        "sell_currency": currency,
+                        "sell_price_pln": sell_price_pln,
+                        "sell_total_pln": total_sell_pln,
+                        "cost_basis_pln": total_cost_pln,
+                        "profit_pln": profit_pln,
+                        "exchange_rate": exchange_rate_to_pln,
+                        "matching_buys": matching_buys,
+                    }
+                )
+
+                logger.info(
+                    f"Processed sale of {shares} {ticker} with profit/loss: {profit_pln:.2f} PLN"
+                )
+
+            elif action == "Split" and ticker in buy_queues:
+                # For a split, multiply shares and divide price by ratio
+                for i in range(len(buy_queues[ticker])):
+                    buy = buy_queues[ticker][i]
+                    # Update shares and price while keeping the product the same
+                    new_shares = (
+                        buy["shares"] / shares if shares != 0 else buy["shares"]
+                    )
+                    new_price = (
+                        buy["price_per_share"] * shares
+                        if shares != 0
+                        else buy["price_per_share"]
+                    )
+                    new_price_pln = new_price * buy["exchange_rate"]
+
+                    buy_queues[ticker][i] = {
+                        "time": buy["time"],
+                        "shares": new_shares,
+                        "price_per_share": new_price,
+                        "price_pln": new_price_pln,
+                        "currency": buy["currency"],
+                        "exchange_rate": buy["exchange_rate"],
+                    }
+
+                logger.info(f"Processed split for {ticker} with ratio {shares}")
+
+            elif action == "Merge" and ticker in buy_queues:
+                # For a merge, divide shares and multiply price by ratio
+                for i in range(len(buy_queues[ticker])):
+                    buy = buy_queues[ticker][i]
+                    # Update shares and price while keeping the product the same
+                    new_shares = (
+                        buy["shares"] * shares if shares != 0 else buy["shares"]
+                    )
+                    new_price = (
+                        buy["price_per_share"] / shares
+                        if shares != 0
+                        else buy["price_per_share"]
+                    )
+                    new_price_pln = new_price * buy["exchange_rate"]
+
+                    buy_queues[ticker][i] = {
+                        "time": buy["time"],
+                        "shares": new_shares,
+                        "price_per_share": new_price,
+                        "price_pln": new_price_pln,
+                        "currency": buy["currency"],
+                        "exchange_rate": buy["exchange_rate"],
+                    }
+
+                logger.info(f"Processed merge for {ticker} with ratio {shares}")
+
+            elif action.startswith("Dividend"):
+                # Process dividend income
+                dividend_pln = total_amount * exchange_rate_to_pln
+                total_dividend += dividend_pln
+                logger.info(f"Processed dividend for {ticker}: {dividend_pln:.2f} PLN")
+
+            elif action.startswith("Interest"):
+                # Process interest income
+                interest_pln = total_amount * exchange_rate_to_pln
+                total_interest += interest_pln
+                logger.info(f"Processed interest: {interest_pln:.2f} PLN")
+
+        except Exception as e:
+            raise Exception(
+                f"Failed to process transaction for {ticker} ({name}) on {transaction_time}: {e}"
+            ) from e
+
+    # Calculate tax amount (19% on positive profit only)
+    taxable_income = total_profit  # We're ignoring dividends and interest as requested
+    tax_amount = max(0, taxable_income * TAX_RATE)
+
+    # Prepare results
+    results = {
+        "tax_amount": tax_amount,
+        "total_profit": total_profit,
+        "total_dividend": total_dividend,
+        "total_interest": total_interest,
+        "transactions": sell_transactions,
+        "profit_by_ticker": profit_by_ticker,
+        "current_holdings": {
+            ticker: list(queue) for ticker, queue in buy_queues.items() if queue
+        },
+    }
+
+    logger.info(f"\nSummary:")
+    logger.info(f"Total Capital Gain/Loss: {total_profit:.2f} PLN")
+    if total_dividend > 0:
+        logger.info(
+            f"Total Dividends: {total_dividend:.2f} PLN (ignored for tax calculation as requested)"
         )
+    if total_interest > 0:
+        logger.info(
+            f"Total Interest: {total_interest:.2f} PLN (ignored for tax calculation as requested)"
+        )
+    logger.info(f"Tax Amount (19%): {tax_amount:.2f} PLN")
 
-        if action == "Market buy":
-            if id not in stocks:
-                stocks[id] = deque()
-            # Append the number of shares, price per share, and time to the deque of the stock
-            stocks[id].append((no_of_shares, price_per_share, time))
+    return results
 
-        elif action == "Market sell":
-            sell_value_pln = no_of_shares * price_per_share * get_eur_pln_rate(time)
-            cost_value_pln = 0
 
-            while no_of_shares > sys.float_info.epsilon:
-                try:
-                    # Get the leftmost buy operation from the deque to follow FIFO rule in tax calculation
-                    buy_no_of_shares, buy_price_per_share, buy_time = stocks[id][0]
-                except IndexError:
-                    raise Exception(
-                        f"Number of shares to sell can't be greater than the number of shares bought. Ticker: {id}, Date: {time}. Make sure that: 1. all operations of action 'Market buy' for {id} are included in data, 2. Required merge and split events are provided for {id}."
-                    )
-                except KeyError:
-                    raise Exception(
-                        f"Sell action can't be executed without preceding buy action. Ticker: {id}, Date: {time}. Make sure all operations of action 'Market buy' for {id} are included in data."
-                    )
+def generate_tax_report(result, year=None):
+    """
+    Generate a human-readable tax report based on calculation results
+    """
+    year_text = f" for Year {year}" if year else ""
+    report = []
+    report.append(f"Tax Report{year_text}")
+    report.append("=" * 80)
 
-                if buy_no_of_shares <= no_of_shares:
-                    # Leftmost buy order is completely consumed by the sell order
-                    cost_value_pln += (
-                        buy_no_of_shares
-                        * buy_price_per_share
-                        * get_eur_pln_rate(buy_time)
-                    )
-                    # Subtract leftmost buy order from sell order
-                    no_of_shares -= buy_no_of_shares
-                    # Remove leftmost buy order from the deque
-                    stocks[id].popleft()
-                else:
-                    # Leftmost buy order is partially consumed by the sell order
-                    cost_value_pln += (
-                        no_of_shares * buy_price_per_share * get_eur_pln_rate(buy_time)
-                    )
-                    # Update number of shares in the leftmost buy order
-                    stocks[id][0] = (
-                        buy_no_of_shares - no_of_shares,
-                        buy_price_per_share,
-                        buy_time,
-                    )
-                    break
+    if not result["transactions"]:
+        report.append("No sell transactions found for this period.")
+        return "\n".join(report)
 
-            profit = sell_value_pln - cost_value_pln
-            total_profit += profit
+    # Format numbers with commas as thousands separators
+    total_profit_formatted = f"{result['total_profit']:,.2f}"
+    tax_amount_formatted = f"{result['tax_amount']:,.2f}"
 
-        elif action == "Split" and id in stocks:
-            # Multiply the number of shares and divide the price by ratio
-            for i in range(len(stocks[id])):
-                stocks[id][i] = (
-                    stocks[id][i][0] / no_of_shares,
-                    stocks[id][i][1] * no_of_shares,
-                    stocks[id][i][2],
+    report.append(f"Total Capital Gain/Loss (PLN): {total_profit_formatted}")
+    report.append(f"Tax Amount (19%, PLN): {tax_amount_formatted}")
+    report.append("")
+
+    # Summary by ticker
+    report.append("Profit/Loss Summary by Ticker:")
+    report.append("-" * 80)
+    for ticker, profit in sorted(
+        result["profit_by_ticker"].items(), key=lambda x: abs(x[1]), reverse=True
+    ):
+        report.append(f"{ticker}: {profit:,.2f} PLN")
+
+    report.append("")
+    report.append("Detailed Sell Transactions:")
+    report.append("-" * 80)
+
+    for i, t in enumerate(result["transactions"], 1):
+        report.append(f"{i}. {t['ticker']} - {t['name']}")
+        report.append(f"   Sell Date: {t['sell_time'].strftime('%Y-%m-%d %H:%M:%S')}")
+        report.append(f"   Shares Sold: {t['shares']}")
+        report.append(
+            f"   Sell Price: {t['sell_price']:.4f} {t['sell_currency']}/share"
+        )
+        report.append(
+            f"   Exchange Rate: 1 {t['sell_currency']} = {t['exchange_rate']:.4f} PLN"
+        )
+        report.append(f"   Sell Price (PLN): {t['sell_price_pln']:,.4f} PLN/share")
+        report.append(f"   Sell Total (PLN): {t['sell_total_pln']:,.2f} PLN")
+        report.append(f"   Cost Basis (PLN): {t['cost_basis_pln']:,.2f} PLN")
+        report.append(f"   Profit/Loss (PLN): {t['profit_pln']:,.2f} PLN")
+        report.append("")
+        report.append("   Matching Buy Transactions (FIFO):")
+
+        for j, buy in enumerate(t["matching_buys"], 1):
+            report.append(
+                f"      {j}. Buy Date: {buy['buy_time'].strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            report.append(f"         Shares: {buy['shares']}")
+            report.append(
+                f"         Buy Price: {buy['buy_price']:.4f} {buy['currency']}/share"
+            )
+            report.append(
+                f"         Exchange Rate: 1 {buy['currency']} = {buy['exchange_rate']:.4f} PLN"
+            )
+            report.append(
+                f"         Buy Price (PLN): {buy['buy_price_pln']:,.4f} PLN/share"
+            )
+
+        report.append("-" * 80)
+
+    # Current holdings section
+    report.append("")
+    report.append("Current Holdings (Unsold Shares):")
+    report.append("-" * 80)
+
+    if not result["current_holdings"]:
+        report.append("No unsold shares.")
+    else:
+        for ticker, buys in result["current_holdings"].items():
+            total_shares = sum(buy["shares"] for buy in buys)
+            report.append(f"{ticker}: {total_shares:,.6f} shares")
+            for i, buy in enumerate(buys, 1):
+                report.append(
+                    f"   {i}. Buy Date: {buy['time'].strftime('%Y-%m-%d %H:%M:%S')}"
                 )
-
-        elif action == "Merge" and id in stocks:
-            # Divide the number of shares and multiply the price by ratio
-            for i in range(len(stocks[id])):
-                stocks[id][i] = (
-                    stocks[id][i][0] * no_of_shares,
-                    stocks[id][i][1] / no_of_shares,
-                    stocks[id][i][2],
+                report.append(f"      Shares: {buy['shares']}")
+                report.append(
+                    f"      Buy Price: {buy['price_per_share']:.4f} {buy['currency']}/share"
                 )
-        elif action.startswith("Interest"):
-            total_interest += total * get_eur_pln_rate(time)
-        elif action.startswith("Dividend"):
-            total_dividend = total * get_eur_pln_rate(time)
+                report.append(
+                    f"      Buy Price (PLN): {buy['price_pln']:,.4f} PLN/share"
+                )
+            report.append("")
 
-    return total_profit, total_dividend, total_interest
+    return "\n".join(report)
 
 
+# Main execution
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Calculate tax on stock trades for Polish tax reporting"
+    )
     parser.add_argument(
-        "--data",
+        "--csv",
         type=str,
         required=True,
-        help="Path to the data file exported from trading212 in csv format",
+        help="CSV file with transaction data from Trading212",
     )
     parser.add_argument(
-        "--merge_split_events",
-        type=str,
-        help="Path to the merge/split events of the stocks in jsonl format",
+        "--year",
+        type=int,
+        help="Year to calculate taxes for (optional, defaults to all years)",
     )
+    parser.add_argument(
+        "--merge_split", type=str, help="JSONL file with merge/split events (optional)"
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Use mock exchange rates instead of API calls (for testing)",
+    )
+
     args = parser.parse_args()
 
-    # Load the data
-    df = pd.read_csv(args.data)
+    try:
+        # Mock the exchange rate function for testing (to avoid API calls)
+        if args.test:
 
-    # Remove duplicates
-    df.drop_duplicates(subset=["ID"], inplace=True)
+            def mock_get_exchange_rate(currency, time):
+                # Return mock exchange rates for testing
+                if currency == "EUR":
+                    return 4.3
+                elif currency == "USD":
+                    return 3.9
+                elif currency == "GBP":
+                    return 5.0
+                elif currency == "GBX":
+                    return 0.05
+                else:
+                    return 1.0
 
-    # Load the merge/split events and include them in the main data
-    if args.merge_split_events:
-        merge_split_events = pd.read_json(args.merge_split_events, lines=True)
+            # Save original function and replace with mock
+            original_get_exchange_rate = get_exchange_rate
+            get_exchange_rate = mock_get_exchange_rate
+            logger.info("Using mock exchange rates for testing")
 
-        # Rename columns to match the main data
-        merge_split_events.rename(columns={"Ratio": "No. of shares"}, inplace=True)
-        # Add a dummy to match the main data
-        merge_split_events["Price / share"] = None
+        year_str = f" for year {args.year}" if args.year else ""
+        logger.info(f"Calculating tax{year_str}...")
 
-        df = pd.concat([df, merge_split_events], ignore_index=True)
+        result = calculate_tax(args.csv, args.year, args.merge_split)
+        report = generate_tax_report(result, args.year)
 
-    # Convert the time column to datetime and sort the values
-    df["Time"] = pd.to_datetime(df["Time"], format="ISO8601")
-    df.sort_values("Time", inplace=True)
+        # Save to file
+        year_suffix = f"_{args.year}" if args.year else ""
+        output_file = f"tax_report{year_suffix}.txt"
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(report)
 
-    total_profit, total_dividend, total_interest = calculate_profit(df)
-    tax = max(0, (total_profit + total_dividend + total_interest) * TAX_RATE)
+        logger.info(f"\nDetailed report saved to {output_file}")
 
-    profit_loss_output = (
-        f"Profit: {total_profit:.6f} PLN."
-        if total_profit >= 0
-        else f"Loss: {total_profit:.6f} PLN."
-    )
-    dividend_output = f" Dividend: {total_dividend:.6f} PLN."
-    interest_output = f" Interest: {total_interest:.6f} PLN."
-    print(
-        profit_loss_output
-        + dividend_output
-        + interest_output
-        + f" Tax to be paid: {tax:.6f} PLN."
-    )
+        # Display critical information in case of positive gains
+        if result["tax_amount"] > 0:
+            logger.info(f"TAX TO PAY: {result['tax_amount']:.2f} PLN")
+
+    except Exception as e:
+        logger.exception(e)
