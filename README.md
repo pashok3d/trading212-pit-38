@@ -3,4 +3,10 @@ Script to generate pit-38 based on annual statements from Trading212
 
 Motivation: It is not that straighforward to pay taxes for dividends and income from sold stocks in Trading212 app, especially when the chosen currency is EUR, but not PLN. The most painfull part is that you can't just use calulcated numbers from annual report from Trading212, because you need to convert partial incomes from EUR/USD to PLN using exchange rate at the moment of asset sale. While there is a paid tool https://kalkulatorgieldowy.pl that can calculate required numbers for your pit-38 declaration, I was not even able to use kalkulatorgieldowy - I found it so frustrating to see different errors when trying to upload statements from the app. Eventually, I gave up on using kalkulatorgieldowy and decided to make my own script. 
 
-Disclaimer: I am not a tax advisor, and this script is not a tax advice. Use it at your own risk. I am not responsible for any mistakes or errors in the script. The script is provided as is, without any warranty of any kind. Please consult with a tax advisor before using this script for your tax declaration.
+DISCLAIMER: I am not a tax advisor, and this script is not tax advice. This tool is specifically designed for Polish tax regulations and may not be applicable in other jurisdictions. 
+
+The script is provided "as is", without warranty of any kind, express or implied. I am not responsible for any mistakes, errors, or inaccuracies in the script or for any damages resulting from its use.
+
+Tax laws change frequently, and this script may not reflect the most current regulations. You are responsible for verifying all calculations before submitting any tax documents. This script does not replace professional tax software or advice.
+
+Please consult with a qualified tax advisor before using the results of this script for your tax declaration.
