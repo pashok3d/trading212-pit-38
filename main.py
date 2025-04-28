@@ -95,6 +95,10 @@ def calculate_tax(csv_file, year=None, merge_split_file=None):
     if merge_split_file:
         try:
             merge_split_events = pd.read_json(merge_split_file, lines=True)
+
+            # Convert the time column to datetime
+            merge_split_events["Time"] = pd.to_datetime(merge_split_events["Time"])
+
             # Rename columns to match the main data
             merge_split_events.rename(columns={"Ratio": "No. of shares"}, inplace=True)
             # Add dummy fields to match the main data schema
@@ -304,7 +308,9 @@ def calculate_tax(csv_file, year=None, merge_split_file=None):
             ) from e
 
     # Calculate tax amount (19% on positive profit only)
-    taxable_income = total_profit  # We're ignoring dividends and interest as requested
+    taxable_income = (
+        total_profit + total_dividend + total_interest
+    )  # Including dividends and interest
     tax_amount = max(0, taxable_income * TAX_RATE)
 
     # Prepare results
@@ -323,13 +329,10 @@ def calculate_tax(csv_file, year=None, merge_split_file=None):
     logger.info(f"\nSummary:")
     logger.info(f"Total Capital Gain/Loss: {total_profit:.2f} PLN")
     if total_dividend > 0:
-        logger.info(
-            f"Total Dividends: {total_dividend:.2f} PLN (ignored for tax calculation as requested)"
-        )
+        logger.info(f"Total Dividends: {total_dividend:.2f} PLN")
     if total_interest > 0:
-        logger.info(
-            f"Total Interest: {total_interest:.2f} PLN (ignored for tax calculation as requested)"
-        )
+        logger.info(f"Total Interest: {total_interest:.2f} PLN")
+    logger.info(f"Total Taxable Income: {taxable_income:.2f} PLN")
     logger.info(f"Tax Amount (19%): {tax_amount:.2f} PLN")
 
     return results
@@ -353,6 +356,11 @@ def generate_tax_report(result, year=None):
     tax_amount_formatted = f"{result['tax_amount']:,.2f}"
 
     report.append(f"Total Capital Gain/Loss (PLN): {total_profit_formatted}")
+    report.append(f"Total Dividends (PLN): {result['total_dividend']:.2f}")
+    report.append(f"Total Interest (PLN): {result['total_interest']:.2f}")
+    report.append(
+        f"Total Taxable Income (PLN): {result['total_profit'] + result['total_dividend'] + result['total_interest']:.2f}"
+    )
     report.append(f"Tax Amount (19%, PLN): {tax_amount_formatted}")
     report.append("")
 
