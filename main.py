@@ -146,11 +146,10 @@ def calculate_tax(csv_file, year=None, merge_split_file=None):
             if pd.isna(currency) and action in ["Market buy", "Market sell"]:
                 raise ValueError("Missing currency")
 
-            # Get exchange rate for the transaction date for relevant currencies
-            exchange_rate_to_pln = get_exchange_rate(currency, transaction_time)
-
             # Handle different types of actions
             if action == "Market buy":
+                exchange_rate_to_pln = get_exchange_rate(currency, transaction_time)
+
                 # Add buy transaction to the queue
                 buy_queues[ticker].append(
                     {
@@ -167,6 +166,8 @@ def calculate_tax(csv_file, year=None, merge_split_file=None):
                 remaining_shares = shares
                 total_cost_pln = 0
                 matching_buys = []
+
+                exchange_rate_to_pln = get_exchange_rate(currency, transaction_time)
 
                 # Calculate sell price in PLN
                 sell_price_pln = price_per_share * exchange_rate_to_pln
@@ -292,12 +293,16 @@ def calculate_tax(csv_file, year=None, merge_split_file=None):
 
             elif action.startswith("Dividend"):
                 # Process dividend income
+                exchange_rate_to_pln = get_exchange_rate(currency, transaction_time)
+
                 dividend_pln = total_amount * exchange_rate_to_pln
                 total_dividend += dividend_pln
                 logger.info(f"Processed dividend for {ticker}: {dividend_pln:.2f} PLN")
 
             elif action.startswith("Interest"):
                 # Process interest income
+                exchange_rate_to_pln = get_exchange_rate(currency, transaction_time)
+
                 interest_pln = total_amount * exchange_rate_to_pln
                 total_interest += interest_pln
                 logger.info(f"Processed interest: {interest_pln:.2f} PLN")
@@ -465,27 +470,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     try:
-        # Mock the exchange rate function for testing (to avoid API calls)
-        if args.test:
-
-            def mock_get_exchange_rate(currency, time):
-                # Return mock exchange rates for testing
-                if currency == "EUR":
-                    return 4.3
-                elif currency == "USD":
-                    return 3.9
-                elif currency == "GBP":
-                    return 5.0
-                elif currency == "GBX":
-                    return 0.05
-                else:
-                    return 1.0
-
-            # Save original function and replace with mock
-            original_get_exchange_rate = get_exchange_rate
-            get_exchange_rate = mock_get_exchange_rate
-            logger.info("Using mock exchange rates for testing")
-
         year_str = f" for year {args.year}" if args.year else ""
         logger.info(f"Calculating tax{year_str}...")
 
