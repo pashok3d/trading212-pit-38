@@ -1,43 +1,41 @@
-import pandas as pd
-import arrow
-import requests
-from collections import defaultdict, deque
 import argparse
 import sys
-from loguru import logger
+from collections import defaultdict, deque
+from functools import lru_cache
 from typing import Literal
+
+import arrow
+import pandas as pd
+import requests
+from loguru import logger
 
 # Tax rate in Poland
 TAX_RATE = 0.19
 
 # Known non-working days in Poland (holidays) for 2024
-# This should be expanded with a complete list of holidays for relevant years
 NON_WORKING_DAYS = [
-    "2024-01-01",  # New Year's Day
-    "2024-01-06",  # Epiphany
-    "2024-03-31",  # Easter
-    "2024-04-01",  # Easter Monday
-    "2024-05-01",  # Labor Day
-    "2024-05-03",  # Constitution Day
-    "2024-05-19",  # Pentecost
-    "2024-05-30",  # Corpus Christi
-    "2024-08-15",  # Assumption Day
-    "2024-11-01",  # All Saints' Day
-    "2024-11-11",  # Independence Day
-    "2024-12-25",  # Christmas Day
-    "2024-12-26",  # Second Day of Christmas
+    "2024-01-01",  # Nowy Rok, Świętej Bożej Rodzicielki Maryi
+    "2024-01-06",  # Trzech Króli (Objawienie Pańskie)
+    "2024-03-31",  # Wielkanoc
+    "2024-04-01",  # Poniedziałek Wielkanocny
+    "2024-05-01",  # Święto Pracy
+    "2024-05-03",  # Święto Konstytucji 3 Maja
+    "2024-05-19",  # Zesłanie Ducha Świętego (Zielone Świątki)
+    "2024-05-30",  # Boże Ciało
+    "2024-08-15",  # Święto Wojska Polskiego, Wniebowzięcie Najświętszej Maryi Panny
+    "2024-11-01",  # Wszystkich Świętych
+    "2024-11-11",  # Święto Niepodległości
+    "2024-12-25",  # Boże Narodzenie (pierwszy dzień)
+    "2024-12-26",  # Boże Narodzenie (drugi dzień)
 ]
 
-# Cache for exchange rates to avoid duplicate API calls
-exchange_rate_cache = {}
 
-
+@lru_cache
 def get_exchange_rate(
     currency: Literal["PLN", "EUR", "GBP"], time: pd.Timestamp
 ) -> float:
     """
     Get the exchange rate for a given currency to PLN on the day before the transaction
-    Uses a cache to avoid duplicate API calls
 
     Raises:
         Exception: If the API request fails
@@ -47,10 +45,11 @@ def get_exchange_rate(
 
     day_before = arrow.get(time).shift(days=-1)
 
+    # Skip non-working holidays
     while day_before.strftime("%Y-%m-%d") in NON_WORKING_DAYS:
-        # Skip the weekends and holidays
         day_before = day_before.shift(days=-1)
 
+    # Skip weekends
     if day_before.isoweekday() in [6, 7]:
         if day_before.isoweekday() == 6:
             day_before = day_before.shift(days=-1)
@@ -60,14 +59,16 @@ def get_exchange_rate(
     url = f"http://api.nbp.pl/api/exchangerates/rates/a/eur/{day_before.strftime('%Y-%m-%d')}/?format=json"
     response = requests.get(url)
 
-    if response.status_code == 200:
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        raise Exception(
+            f"Failed to fetch {currency}-PLN exchange rate from NBP API. Status code: {response.status_code}"
+        ) from e
+    else:
         data = response.json()
         price = data["rates"][0]["mid"]
         return price
-    else:
-        raise Exception(
-            f"Failed to fetch {currency}-PLN exchange rate from NBP API. Status code: {response.status_code}"
-        )
 
 
 def calculate_tax(csv_file, year=None, merge_split_file=None):
