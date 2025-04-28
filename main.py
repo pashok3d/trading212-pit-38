@@ -56,7 +56,7 @@ def get_exchange_rate(
         elif day_before.isoweekday() == 7:
             day_before = day_before.shift(days=-2)
 
-    url = f"http://api.nbp.pl/api/exchangerates/rates/a/eur/{day_before.strftime('%Y-%m-%d')}/?format=json"
+    url = f"http://api.nbp.pl/api/exchangerates/rates/a/{currency}/{day_before.strftime('%Y-%m-%d')}/?format=json"
     response = requests.get(url)
 
     try:
