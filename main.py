@@ -1,4 +1,6 @@
 import argparse
+import glob
+import os
 import sys
 from collections import defaultdict, deque
 from functools import lru_cache
@@ -14,6 +16,45 @@ TAX_RATE = 0.19
 
 # Known non-working days in Poland (holidays) for 2024
 NON_WORKING_DAYS = [
+    "2021-01-01",  # Nowy Rok, Świętej Bożej Rodzicielki Maryi (New Year's Day)
+    "2021-01-06",  # Trzech Króli (Epiphany)
+    "2021-04-04",  # Wielkanoc (Easter Sunday)
+    "2021-04-05",  # Poniedziałek Wielkanocny (Easter Monday)
+    "2021-05-01",  # Święto Pracy (Labor Day)
+    "2021-05-03",  # Święto Konstytucji 3 Maja (Constitution Day)
+    "2021-05-23",  # Zesłanie Ducha Świętego (Pentecost Sunday)
+    "2021-06-03",  # Boże Ciało (Corpus Christi)
+    "2021-08-15",  # Święto Wojska Polskiego, Wniebowzięcie Najświętszej Maryi Panny (Polish Army Day, Assumption of Mary)
+    "2021-11-01",  # Wszystkich Świętych (All Saints' Day)
+    "2021-11-11",  # Święto Niepodległości (Independence Day)
+    "2021-12-25",  # Boże Narodzenie (pierwszy dzień) (Christmas Day)
+    "2021-12-26",  # Boże Narodzenie (drugi dzień) (Second Day of Christmas)
+    "2022-01-01",  # Nowy Rok, Świętej Bożej Rodzicielki Maryi (New Year's Day)
+    "2022-01-06",  # Trzech Króli (Epiphany)
+    "2022-04-17",  # Wielkanoc (Easter Sunday)
+    "2022-04-18",  # Poniedziałek Wielkanocny (Easter Monday)
+    "2022-05-01",  # Święto Pracy (Labor Day)
+    "2022-05-03",  # Święto Konstytucji 3 Maja (Constitution Day)
+    "2022-06-05",  # Zesłanie Ducha Świętego (Pentecost Sunday)
+    "2022-06-16",  # Boże Ciało (Corpus Christi)
+    "2022-08-15",  # Święto Wojska Polskiego, Wniebowzięcie Najświętszej Maryi Panny (Polish Army Day, Assumption of Mary)
+    "2022-11-01",  # Wszystkich Świętych (All Saints' Day)
+    "2022-11-11",  # Święto Niepodległości (Independence Day)
+    "2022-12-25",  # Boże Narodzenie (pierwszy dzień) (Christmas Day)
+    "2022-12-26",  # Boże Narodzenie (drugi dzień) (Second Day of Christmas)
+    "2023-01-01",  # Nowy Rok (New Year's Day)
+    "2023-01-06",  # Święto Trzech Króli (Epiphany)
+    "2023-04-09",  # pierwszy dzień Wielkiej Nocy (Easter Sunday)
+    "2023-04-10",  # drugi dzień Wielkiej Nocy (Easter Monday)
+    "2023-05-01",  # Święto Państwowe (Labor Day)
+    "2023-05-03",  # Święto Narodowe Trzeciego Maja (Constitution Day)
+    "2023-05-28",  # Zielone Świątki (Pentecost Sunday)
+    "2023-06-08",  # Boże Ciało (Corpus Christi)
+    "2023-08-15",  # Wniebowzięcie Najświętszej Maryi Panny (Assumption of Mary)
+    "2023-11-01",  # Wszystkich Świętych (All Saints' Day)
+    "2023-11-11",  # Narodowe Święto Niepodległości (Independence Day)
+    "2023-12-25",  # pierwszy dzień Bożego Narodzenia (Christmas Day)
+    "2023-12-26",  # drugi dzień Bożego Narodzenia (Second Day of Christmas)
     "2024-01-01",  # Nowy Rok, Świętej Bożej Rodzicielki Maryi
     "2024-01-06",  # Trzech Króli (Objawienie Pańskie)
     "2024-03-31",  # Wielkanoc
@@ -32,7 +73,7 @@ NON_WORKING_DAYS = [
 
 @lru_cache
 def get_exchange_rate(
-    currency: Literal["PLN", "EUR", "GBP"], time: pd.Timestamp
+    currency: Literal["PLN", "EUR", "GBP", "GBX"], time: pd.Timestamp
 ) -> float:
     """
     Get the exchange rate for a given currency to PLN on the day before the transaction
@@ -43,18 +84,18 @@ def get_exchange_rate(
     if currency == "PLN":
         return 1.0
 
+    if currency == "GBX":
+        # Get GBP rate and divide by 100
+        gbp_rate = get_exchange_rate("GBP", time)
+        return gbp_rate / 100.0
+
     day_before = arrow.get(time).shift(days=-1)
 
-    # Skip non-working holidays
-    while day_before.strftime("%Y-%m-%d") in NON_WORKING_DAYS:
+    # Skip non-working holidays and weekends
+    while day_before.strftime(
+        "%Y-%m-%d"
+    ) in NON_WORKING_DAYS or day_before.isoweekday() in [6, 7]:
         day_before = day_before.shift(days=-1)
-
-    # Skip weekends
-    if day_before.isoweekday() in [6, 7]:
-        if day_before.isoweekday() == 6:
-            day_before = day_before.shift(days=-1)
-        elif day_before.isoweekday() == 7:
-            day_before = day_before.shift(days=-2)
 
     url = f"http://api.nbp.pl/api/exchangerates/rates/a/{currency}/{day_before.strftime('%Y-%m-%d')}/?format=json"
     response = requests.get(url)
@@ -71,17 +112,81 @@ def get_exchange_rate(
         return price
 
 
-def calculate_tax(csv_file, year=None, merge_split_file=None):
+def load_csv_files(path: str) -> pd.DataFrame:
     """
-    Calculate tax based on the trading activity in the CSV file
+    Load and merge CSV files from a directory or a single CSV file
+
+    Args:
+        path: Path to a CSV file or directory containing CSV files
+
+    Returns:
+        DataFrame with merged transaction data
+
+    Raises:
+        Exception: If no CSV files are found or if there are issues loading the files
+    """
+    if os.path.isdir(path):
+        # If path is a directory, find all CSV files
+        csv_files = glob.glob(os.path.join(path, "*.csv"))
+        if not csv_files:
+            raise FileNotFoundError(f"No CSV files found in directory: {path}")
+
+        logger.info(f"Found {len(csv_files)} CSV files in {path}")
+
+        # Create an empty list to store dataframes
+        dfs = []
+
+        # Load each CSV file and append to list
+        for csv_file in csv_files:
+            try:
+                logger.info(f"Reading transactions from {csv_file}...")
+                df = pd.read_csv(csv_file)
+                dfs.append(df)
+                logger.info(
+                    f"Loaded {len(df)} transactions from {os.path.basename(csv_file)}"
+                )
+            except Exception as e:
+                logger.error(f"Error loading {csv_file}: {e}")
+                raise Exception(f"Failed to load CSV file {csv_file}: {e}") from e
+
+        # Merge all dataframes
+        merged_df = pd.concat(dfs, ignore_index=True)
+        logger.info(f"Total transactions after merging: {len(merged_df)}")
+
+        return merged_df
+
+    elif os.path.isfile(path):
+        # If path is a single CSV file
+        try:
+            logger.info(f"Reading transactions from {path}...")
+            df = pd.read_csv(path)
+            logger.info(f"Loaded {len(df)} transactions")
+            return df
+        except Exception as e:
+            raise Exception(f"Failed to load CSV file {path}: {e}") from e
+
+    else:
+        raise FileNotFoundError(
+            f"Invalid path: {path}. Must be a CSV file or a directory containing CSV files."
+        )
+
+
+def calculate_tax(csv_path, year=None, merge_split_file=None):
+    """
+    Calculate tax based on the trading activity in the CSV files
     using FIFO method as required by Polish tax law
+
+    Args:
+        csv_path: Path to a CSV file or directory containing CSV files
+        year: Optional year to filter transactions
+        merge_split_file: Optional path to file with merge/split events
     """
     # Read the CSV file
-    logger.info(f"Reading transactions from {csv_file}...")
-    df = pd.read_csv(csv_file)
+    logger.info(f"Reading transactions from {csv_path}...")
+    df = load_csv_files(csv_path)
 
     # Convert the time column to datetime
-    df["Time"] = pd.to_datetime(df["Time"])
+    df["Time"] = pd.to_datetime(df["Time"], format="mixed")
 
     # Filter transactions for the specified year if provided
     if year:
@@ -140,6 +245,7 @@ def calculate_tax(csv_file, year=None, merge_split_file=None):
                 float(row["Price / share"]) if pd.notna(row["Price / share"]) else 0
             )
             currency = row["Currency (Price / share)"]
+            currency_total = row["Currency (Total)"]
             total_amount = float(row["Total"]) if pd.notna(row["Total"]) else 0
 
             # Skip if necessary fields are missing
@@ -163,6 +269,11 @@ def calculate_tax(csv_file, year=None, merge_split_file=None):
                 )
 
             elif action == "Market sell":
+
+                if ticker == "TSLA" and transaction_time == pd.Timestamp(
+                    "2023-09-15 14:46:41"
+                ):
+                    pass
                 remaining_shares = shares
                 total_cost_pln = 0
                 matching_buys = []
@@ -239,31 +350,36 @@ def calculate_tax(csv_file, year=None, merge_split_file=None):
                     f"Processed sale of {shares} {ticker} with profit/loss: {profit_pln:.2f} PLN"
                 )
 
-            elif action == "Split" and ticker in buy_queues:
-                # For a split, multiply shares and divide price by ratio
-                for i in range(len(buy_queues[ticker])):
-                    buy = buy_queues[ticker][i]
-                    # Update shares and price while keeping the product the same
-                    new_shares = (
-                        buy["shares"] / shares if shares != 0 else buy["shares"]
-                    )
-                    new_price = (
-                        buy["price_per_share"] * shares
-                        if shares != 0
-                        else buy["price_per_share"]
-                    )
-                    new_price_pln = new_price * buy["exchange_rate"]
+            elif action == "Split":
+                if ticker in buy_queues:
+                    # For a split, multiply shares and divide price by ratio
+                    for i in range(len(buy_queues[ticker])):
+                        buy = buy_queues[ticker][i]
+                        # Update shares and price while keeping the product the same
+                        new_shares = (
+                            buy["shares"] * shares if shares != 0 else buy["shares"]
+                        )
+                        new_price = (
+                            buy["price_per_share"] / shares
+                            if shares != 0
+                            else buy["price_per_share"]
+                        )
+                        new_price_pln = new_price * buy["exchange_rate"]
 
-                    buy_queues[ticker][i] = {
-                        "time": buy["time"],
-                        "shares": new_shares,
-                        "price_per_share": new_price,
-                        "price_pln": new_price_pln,
-                        "currency": buy["currency"],
-                        "exchange_rate": buy["exchange_rate"],
-                    }
+                        buy_queues[ticker][i] = {
+                            "time": buy["time"],
+                            "shares": new_shares,
+                            "price_per_share": new_price,
+                            "price_pln": new_price_pln,
+                            "currency": buy["currency"],
+                            "exchange_rate": buy["exchange_rate"],
+                        }
 
-                logger.info(f"Processed split for {ticker} with ratio {shares}")
+                    logger.info(f"Processed split for {ticker} with ratio {shares}")
+                else:
+                    logger.warning(
+                        f"Split event for {ticker} with ratio {shares} but no matching buy transactions found."
+                    )
 
             elif action == "Merge" and ticker in buy_queues:
                 # For a merge, divide shares and multiply price by ratio
@@ -300,12 +416,38 @@ def calculate_tax(csv_file, year=None, merge_split_file=None):
                 logger.info(f"Processed dividend for {ticker}: {dividend_pln:.2f} PLN")
 
             elif action.startswith("Interest"):
-                # Process interest income
-                exchange_rate_to_pln = get_exchange_rate(currency, transaction_time)
+
+                if action == "Interest on cash":
+                    exchange_rate_to_pln = get_exchange_rate(
+                        currency_total, transaction_time
+                    )
+                else:
+                    # Process interest income
+                    exchange_rate_to_pln = get_exchange_rate(currency, transaction_time)
 
                 interest_pln = total_amount * exchange_rate_to_pln
                 total_interest += interest_pln
                 logger.info(f"Processed interest: {interest_pln:.2f} PLN")
+
+            elif action.startswith("Lending"):
+                # Process share lending interest income
+                exchange_rate_to_pln = get_exchange_rate(
+                    currency_total, transaction_time
+                )
+
+                lending_interest_pln = total_amount * exchange_rate_to_pln
+                total_interest += lending_interest_pln
+                logger.info(
+                    f"Processed share lending interest: {lending_interest_pln:.2f} PLN"
+                )
+
+            elif action == "Deposit":
+                pass
+
+            else:
+                logger.warning(
+                    f"Unknown action '{action}' for {ticker} on {transaction_time}. Skipping."
+                )
 
         except Exception as e:
             raise Exception(
@@ -451,7 +593,7 @@ if __name__ == "__main__":
         "--csv",
         type=str,
         required=True,
-        help="CSV file with transaction data from Trading212",
+        help="CSV file or directory containing CSV files with transaction data",
     )
     parser.add_argument(
         "--year",
@@ -470,6 +612,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     try:
+        if os.path.isdir(args.csv):
+            logger.info(f"Processing CSV files from directory: {args.csv}...")
+        else:
+            logger.info(f"Processing CSV file: {args.csv}...")
+
         year_str = f" for year {args.year}" if args.year else ""
         logger.info(f"Calculating tax{year_str}...")
 

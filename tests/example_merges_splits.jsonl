@@ -1,2 +1,7 @@
-{"Action": "Split", "Time": "2022-08-25", "Ticker": "TSLA", "Ratio": 0.3333333333333333}
-{"Action": "Split", "Time": "2022-08-25", "Ticker": "TL0","Ratio": 0.3333333333333333}
+{"Action": "Split", "Ticker": "TSLA", "Name": "Tesla Inc", "Time": "2022-08-25", "Ratio": 3.0, "Currency (Price / share)": "USD", "Currency (Total)": "USD", "Total": 0}
+{"Action": "Split", "Ticker": "AMZN", "Name": "Amazon", "Time": "2022-06-06", "Ratio": 20, "Currency (Price / share)": "USD", "Currency (Total)": "USD", "Total": 0}
+{"Action": "Split", "Ticker": "GOOGL", "Name": "Alphabet (Class A)", "Time": "2022-07-18", "Ratio": 20, "Currency (Price / share)": "USD", "Currency (Total)": "USD", "Total": 0}
+{"Action": "Split", "Ticker": "NVDA", "Name": "Nvidia", "Time": "2024-06-10", "Ratio": 10, "Currency (Price / share)": "USD", "Currency (Total)": "USD", "Total": 0}
+{"Action": "Split", "Ticker": "NVD", "Name": "Nvidia", "Time": "2024-06-10", "Ratio": 10, "Currency (Price / share)": "EUR", "Currency (Total)": "EUR", "Total": 0}
+{"Action": "Split", "Ticker": "PXMD", "Name": "PaxMedica", "Time": "2023-10-31", "Ratio": 0.05882352941, "Currency (Price / share)": "USD", "Currency (Total)": "USD", "Total": 0}
+{"Action": "Split", "Ticker": "NGAS", "Name": "WisdomTree Natural Gas", "Time": "2023-10-31", "Ratio": 0.0005608524958, "Currency (Price / share)": "USD", "Currency (Total)": "USD", "Total": 0}
