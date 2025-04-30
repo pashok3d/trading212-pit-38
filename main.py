@@ -189,8 +189,11 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
     # Convert the time column to datetime
     df["Time"] = pd.to_datetime(df["Time"], format="mixed")
 
-    # Remove duplicates if they exist
-    df.drop_duplicates(subset=["ID"], inplace=True)
+    # Only deduplicate rows that have non-null IDs
+    id_rows = df[df["ID"].notna()]
+    id_rows_deduped = id_rows.drop_duplicates(subset=["ID"])
+    non_id_rows = df[df["ID"].isna()]
+    df = pd.concat([id_rows_deduped, non_id_rows], ignore_index=True)
 
     # Load merge/split events if provided
     if merge_split_file:
@@ -242,6 +245,9 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
             shares = float(row["No. of shares"])
             price_per_share = (
                 float(row["Price / share"]) if pd.notna(row["Price / share"]) else 0
+            )
+            n_of_shares = (
+                float(row["No. of shares"]) if pd.notna(row["No. of shares"]) else 0
             )
             currency = row["Currency (Price / share)"]
             currency_total = row["Currency (Total)"]
@@ -414,7 +420,7 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
                 # Process dividend income
                 exchange_rate_to_pln = get_exchange_rate(currency, transaction_time)
 
-                dividend_pln = total_amount * exchange_rate_to_pln
+                dividend_pln = n_of_shares * price_per_share * exchange_rate_to_pln
                 yearly_dividend[transaction_year] += dividend_pln
                 logger.info(f"Processed dividend for {ticker}: {dividend_pln:.2f} PLN")
 
@@ -444,7 +450,7 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
                     f"Processed share lending interest: {lending_interest_pln:.2f} PLN"
                 )
 
-            elif action == "Deposit":
+            elif action in ["Deposit", "Withdrawal"]:
                 pass
 
             else:
