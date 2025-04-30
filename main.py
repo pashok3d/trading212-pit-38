@@ -274,11 +274,6 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
                 )
 
             elif action == "Market sell":
-
-                if ticker == "TSLA" and transaction_time == pd.Timestamp(
-                    "2023-09-15 14:46:41"
-                ):
-                    pass
                 remaining_shares = shares
                 total_cost_pln = 0
                 matching_buys = []
