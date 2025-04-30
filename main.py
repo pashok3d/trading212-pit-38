@@ -178,7 +178,8 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
 
     Args:
         csv_path: Path to a CSV file or directory containing CSV files
-        year: Optional year to filter transactions
+        year: Optional year to filter taxable events (sell transactions, dividends, interest)
+              Note: All buy transactions are processed regardless of year to maintain FIFO
         merge_split_file: Optional path to file with merge/split events
     """
     # Read the CSV file
@@ -187,11 +188,6 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
 
     # Convert the time column to datetime
     df["Time"] = pd.to_datetime(df["Time"], format="mixed")
-
-    # Filter transactions for the specified year if provided
-    if year:
-        df = df[df["Time"].dt.year == year]
-        logger.info(f"Found {len(df)} transactions for {year}")
 
     # Remove duplicates if they exist
     df.drop_duplicates(subset=["ID"], inplace=True)
@@ -227,10 +223,12 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
     # Dictionary to track profit by ticker
     profit_by_ticker = defaultdict(float)
 
-    # Track totals
-    total_profit = 0
-    total_dividend = 0
-    total_interest = 0
+    # Track totals by year
+    yearly_profit = defaultdict(float)
+    yearly_dividend = defaultdict(float)
+    yearly_interest = defaultdict(float)
+    yearly_sell_transactions = defaultdict(list)
+    yearly_profit_by_ticker = defaultdict(lambda: defaultdict(float))
 
     # Process transactions in chronological order
     for _, row in df.iterrows():
@@ -238,6 +236,7 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
         ticker = row["Ticker"]
         name = row.get("Name", ticker)  # Use ticker as fallback if name not present
         transaction_time = row["Time"]
+        transaction_year = transaction_time.year
 
         try:
             shares = float(row["No. of shares"])
@@ -325,26 +324,30 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
 
                 # Calculate profit in PLN
                 profit_pln = total_sell_pln - total_cost_pln
-                total_profit += profit_pln
-                profit_by_ticker[ticker] += profit_pln
 
-                # Record the sell transaction with profit information
-                sell_transactions.append(
-                    {
-                        "ticker": ticker,
-                        "name": name,
-                        "sell_time": transaction_time,
-                        "shares": shares,
-                        "sell_price": price_per_share,
-                        "sell_currency": currency,
-                        "sell_price_pln": sell_price_pln,
-                        "sell_total_pln": total_sell_pln,
-                        "cost_basis_pln": total_cost_pln,
-                        "profit_pln": profit_pln,
-                        "exchange_rate": exchange_rate_to_pln,
-                        "matching_buys": matching_buys,
-                    }
-                )
+                # Store the sell transaction with profit information
+                sell_record = {
+                    "ticker": ticker,
+                    "name": name,
+                    "sell_time": transaction_time,
+                    "shares": shares,
+                    "sell_price": price_per_share,
+                    "sell_currency": currency,
+                    "sell_price_pln": sell_price_pln,
+                    "sell_total_pln": total_sell_pln,
+                    "cost_basis_pln": total_cost_pln,
+                    "profit_pln": profit_pln,
+                    "exchange_rate": exchange_rate_to_pln,
+                    "matching_buys": matching_buys,
+                }
+
+                # Add to total and yearly records
+                yearly_profit[transaction_year] += profit_pln
+                yearly_sell_transactions[transaction_year].append(sell_record)
+                yearly_profit_by_ticker[transaction_year][ticker] += profit_pln
+
+                sell_transactions.append(sell_record)
+                profit_by_ticker[ticker] += profit_pln
 
                 logger.info(
                     f"Processed sale of {shares} {ticker} with profit/loss: {profit_pln:.2f} PLN"
@@ -412,7 +415,7 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
                 exchange_rate_to_pln = get_exchange_rate(currency, transaction_time)
 
                 dividend_pln = total_amount * exchange_rate_to_pln
-                total_dividend += dividend_pln
+                yearly_dividend[transaction_year] += dividend_pln
                 logger.info(f"Processed dividend for {ticker}: {dividend_pln:.2f} PLN")
 
             elif action.startswith("Interest"):
@@ -426,7 +429,7 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
                     exchange_rate_to_pln = get_exchange_rate(currency, transaction_time)
 
                 interest_pln = total_amount * exchange_rate_to_pln
-                total_interest += interest_pln
+                yearly_interest[transaction_year] += interest_pln
                 logger.info(f"Processed interest: {interest_pln:.2f} PLN")
 
             elif action.startswith("Lending"):
@@ -436,7 +439,7 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
                 )
 
                 lending_interest_pln = total_amount * exchange_rate_to_pln
-                total_interest += lending_interest_pln
+                yearly_interest[transaction_year] += interest_pln
                 logger.info(
                     f"Processed share lending interest: {lending_interest_pln:.2f} PLN"
                 )
@@ -454,33 +457,69 @@ def calculate_tax(csv_path, year=None, merge_split_file=None):
                 f"Failed to process transaction for {ticker} ({name}) on {transaction_time}: {e}"
             ) from e
 
-    # Calculate tax amount (19% on positive profit only)
-    taxable_income = (
-        total_profit + total_dividend + total_interest
-    )  # Including dividends and interest
-    tax_amount = max(0, taxable_income * TAX_RATE)
+    # Prepare results based on whether a specific year was requested
+    if year:
+        # Filter results for the specified year
+        year_profit = yearly_profit.get(year, 0)
+        year_dividend = yearly_dividend.get(year, 0)
+        year_interest = yearly_interest.get(year, 0)
+        year_transactions = yearly_sell_transactions.get(year, [])
+        year_profit_by_ticker = yearly_profit_by_ticker.get(year, {})
 
-    # Prepare results
-    results = {
-        "tax_amount": tax_amount,
-        "total_profit": total_profit,
-        "total_dividend": total_dividend,
-        "total_interest": total_interest,
-        "transactions": sell_transactions,
-        "profit_by_ticker": profit_by_ticker,
-        "current_holdings": {
-            ticker: list(queue) for ticker, queue in buy_queues.items() if queue
-        },
-    }
+        # Calculate tax amount (19% on positive profit only for the specified year)
+        taxable_income = year_profit + year_dividend + year_interest
+        tax_amount = max(0, taxable_income * TAX_RATE)
 
-    logger.info(f"\nSummary:")
-    logger.info(f"Total Capital Gain/Loss: {total_profit:.2f} PLN")
-    if total_dividend > 0:
-        logger.info(f"Total Dividends: {total_dividend:.2f} PLN")
-    if total_interest > 0:
-        logger.info(f"Total Interest: {total_interest:.2f} PLN")
-    logger.info(f"Total Taxable Income: {taxable_income:.2f} PLN")
-    logger.info(f"Tax Amount (19%): {tax_amount:.2f} PLN")
+        logger.info(f"\nSummary for year {year}:")
+        logger.info(f"Total Capital Gain/Loss: {year_profit:.2f} PLN")
+        if year_dividend > 0:
+            logger.info(f"Total Dividends: {year_dividend:.2f} PLN")
+        if year_interest > 0:
+            logger.info(f"Total Interest: {year_interest:.2f} PLN")
+        logger.info(f"Total Taxable Income: {taxable_income:.2f} PLN")
+        logger.info(f"Tax Amount (19%): {tax_amount:.2f} PLN")
+
+        results = {
+            "tax_amount": tax_amount,
+            "total_profit": year_profit,
+            "total_dividend": year_dividend,
+            "total_interest": year_interest,
+            "transactions": year_transactions,
+            "profit_by_ticker": year_profit_by_ticker,
+            "current_holdings": {
+                ticker: list(queue) for ticker, queue in buy_queues.items() if queue
+            },
+        }
+    else:
+        # Calculate totals for all years
+        total_profit = sum(yearly_profit.values())
+        total_dividend = sum(yearly_dividend.values())
+        total_interest = sum(yearly_interest.values())
+
+        # Calculate tax amount (19% on positive profit only)
+        taxable_income = total_profit + total_dividend + total_interest
+        tax_amount = max(0, taxable_income * TAX_RATE)
+
+        logger.info(f"\nSummary for all years:")
+        logger.info(f"Total Capital Gain/Loss: {total_profit:.2f} PLN")
+        if total_dividend > 0:
+            logger.info(f"Total Dividends: {total_dividend:.2f} PLN")
+        if total_interest > 0:
+            logger.info(f"Total Interest: {total_interest:.2f} PLN")
+        logger.info(f"Total Taxable Income: {taxable_income:.2f} PLN")
+        logger.info(f"Tax Amount (19%): {tax_amount:.2f} PLN")
+
+        results = {
+            "tax_amount": tax_amount,
+            "total_profit": total_profit,
+            "total_dividend": total_dividend,
+            "total_interest": total_interest,
+            "transactions": sell_transactions,
+            "profit_by_ticker": profit_by_ticker,
+            "current_holdings": {
+                ticker: list(queue) for ticker, queue in buy_queues.items() if queue
+            },
+        }
 
     return results
 
