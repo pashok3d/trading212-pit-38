@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom styles can be added here */
+html,
+body {
+    @apply h-full;
+}
+
+#__next {
+    @apply h-full;
+}

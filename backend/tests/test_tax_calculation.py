@@ -3,8 +3,8 @@ from unittest import mock
 
 import pytest
 
-import main
-from main import calculate_tax
+import backend.app.main as main
+from backend.app.main import calculate_tax
 
 
 # Define a simple mock exchange rate
